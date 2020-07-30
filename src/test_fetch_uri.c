@@ -104,7 +104,7 @@ static void test_fetch_http_nofragment_success(void) {
     g_assert (g_file_query_exists (file, NULL) != FALSE);
     file_info = g_file_query_info (file, G_FILE_ATTRIBUTE_UNIX_MODE, G_FILE_QUERY_INFO_NONE, NULL, NULL);
     file_mode = g_file_info_get_attribute_uint32 (file_info, G_FILE_ATTRIBUTE_UNIX_MODE);
-    g_assert (file_mode == (S_IFREG | S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH));
+    g_assert_cmpuint (file_mode, ==, (S_IFREG | S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH));
 
     g_file_delete (file, NULL, NULL);
     g_object_unref (file_info);
@@ -386,6 +386,66 @@ static void test_fetch_http_fragment_success(void) {
     soup_uri_free(url);
 }
 
+static void
+test_fetch_http_fragment_success_zip (void)
+{
+    RunData *run_data;
+    guint32 file_mode = 0;
+    GFileInfo *file_info = NULL;
+
+    run_data = g_slice_new0 (RunData);
+    run_data->entry = g_string_new (NULL);
+    run_data->loop = g_main_loop_new (NULL, TRUE);
+
+    SoupURI *url = soup_uri_new ("http://localhost:8000/beaker-core-tasks.zip#reservesys");
+    gchar *path = g_dir_make_tmp ("test_fetch_http_XXXXXX", NULL);
+
+    restraint_fetch_uri (url,
+                         path,
+                         FALSE,
+                         TRUE,
+                         archive_entry_callback,
+                         fetch_finish_callback,
+                         run_data);
+
+    // run event loop while process is running.
+    g_main_loop_run (run_data->loop);
+
+    // check that initial request worked.
+    g_assert_no_error (run_data->error);
+
+    GFile *base = g_file_new_for_path (path);
+
+    GFile *file = g_file_get_child (base, "Makefile");
+    g_assert(g_file_query_exists (file, NULL) != FALSE);
+    g_file_delete (file, NULL, NULL);
+    g_object_unref(file);
+
+    file = g_file_get_child(base, "metadata");
+    g_assert(g_file_query_exists (file, NULL) != FALSE);
+    g_file_delete (file, NULL, NULL);
+    g_object_unref(file);
+
+    file = g_file_get_child(base, "runtest.sh");
+    g_assert (g_file_query_exists (file, NULL) != FALSE);
+    file_info = g_file_query_info (file, G_FILE_ATTRIBUTE_UNIX_MODE, G_FILE_QUERY_INFO_NONE, NULL, NULL);
+    file_mode = g_file_info_get_attribute_uint32 (file_info, G_FILE_ATTRIBUTE_UNIX_MODE);
+    g_assert_cmpuint (file_mode, ==, (S_IFREG | S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH));
+    g_file_delete (file, NULL, NULL);
+    g_object_unref (file_info);
+    g_object_unref (file);
+
+    g_object_unref (base);
+
+    // free our memory
+    g_string_free (run_data->entry, TRUE);
+    g_clear_error (&run_data->error);
+    g_slice_free (RunData, run_data);
+    g_remove (path);
+    g_free (path);
+    soup_uri_free (url);
+}
+
 static void test_fetch_http_fragment_fail(void) {
     RunData *run_data;
 
@@ -626,6 +686,7 @@ int main(int argc, char *argv[]) {
     g_test_add_func("/fetch_http/nofragment/fail", test_fetch_http_nofragment_fail);
     g_test_add_func("/fetch_http/nofragment/keepchanges", test_fetch_http_nofragment_keepchanges);
     g_test_add_func("/fetch_http/fragment/success", test_fetch_http_fragment_success);
+    g_test_add_func("/fetch_http/fragment_zip/success", test_fetch_http_fragment_success_zip);
     g_test_add_func("/fetch_http/fragment/fail", test_fetch_http_fragment_fail);
     g_test_add_func("/fetch_file/fragment/trailing/slash", test_fetch_file_fragment_trailing_slash);
     g_test_add_func("/fetch_file/fragment/no/trailing/slash", test_fetch_file_fragment_no_trailing_slash);
