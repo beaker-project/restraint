@@ -4,6 +4,7 @@ PLUGIN=$(basename $0)
 
 SLABLOG=$(mktemp)
 PS_LWD=$(mktemp -d)
+MAX_SECS_IN_LOOP=120
 
 # Check to see if journalctl exists.
 if command -v journalctl 2> /dev/null; then
@@ -19,36 +20,25 @@ function WatchFile ()
     FILE=$1
 
     TMPFILE=$(mktemp -p /mnt/testarea -t Watch.XXXXX)
-    while true; do
+    # Using Bash feature variable 'SECONDS' which keeps count of SECONDS
+    # as the script is running. Do not 'unset' SECONDS as it will
+    # change it to a regular variable.
+    SECONDS=0
+    while [ $SECONDS -lt $MAX_SECS_IN_LOOP ]; do
         if [ $JOURNALCTL = true ]; then
             journalctl -b > $FILE
         fi
         diff=$(diff -q $FILE $TMPFILE)
         rc=$?
-        if [ $rc == 1 ]; then
+        if [ $rc -eq 1 ]; then
             cat $FILE > $TMPFILE
         else
             rm $TMPFILE
-            return $rc
+            break
         fi
         sleep 2
     done
-}
-
-function SysRq ()
-{
-    ACTION=$1
-    logger -p local2.info -t "List of $ACTION Tasks" Start
-    sleep 1
-    echo $ACTION > /proc/sysrq-trigger
-    # Wait until logfile has changed.
-    WatchFile $LOGFILE
-    if [[ $? -ne 0 ]]; then
-        logger -p local2.warning -t "List of $ACTION Tasks" Check on $LOGFILE failed
-    fi
-
-    logger -p local2.info -t "List of $ACTION Tasks" Stop
-
+    return $rc
 }
 
 # Verbose tree view of running processes:
@@ -61,11 +51,21 @@ rm -rf $PS_LWD
 
 PROCLIST='m t w'
 
+logger -p local2.info "Gathering System Tasks and Memory Summary Started" -t "restraintd"
 for p in $PROCLIST ; do
     # Dump a list of blocked tasks and their information
-    SysRq $p
-    sleep 2
+    echo $p > /proc/sysrq-trigger
 done
+# Pause until logfile has quiesced.
+WatchFile $LOGFILE
+rc=$?
+if [[ $rc -eq 0 ]]; then
+    logger -p local2.info "Gathering System Tasks and Memory Summary Completed" -t "restraintd"
+elif [[ $rc -eq 1 ]]; then
+    logger -p local2.warning "Gathering System Resources exceeded time" -t "restraintd"
+else
+    logger -p local2.warning "Gathering System Resources failed rc=$rc" -t "restraintd"
+fi
 
 # Send slab info to a file for logging
 timestamp=$(/bin/date '+%F %T')
@@ -76,7 +76,7 @@ echo "Dumping slabinfo - Stop - $timestamp" >> $SLABLOG
 logger -p local2.info -t "SlabCacheInfo" -f $SLABLOG
 
 if [ $JOURNALCTL = true ]; then
-    journalctl -b > /mnt/testarea/journalctl
+    journalctl -b > $LOGFILE
 fi
 
 # Submit dmesg log if any output

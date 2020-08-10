@@ -1,0 +1,12 @@
+fixes:
+  - |
+    Prevent potential infinite loop in Local Watchdog plugin
+
+    Under given circumstances, it is possible for one of the
+    local watchdog plugins to fall into an infinite loop.
+    Changes were made to reduce the number of loops and
+    to reduce the loop to no more than 2 minutes since older
+    OSs take longer to report requested system resources.
+    Additionally, unnecessary sleep operations have been
+    eliminated.  As a result, the plugin `20_sysinfo` will
+    take less time to run.
