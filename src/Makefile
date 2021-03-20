@@ -29,7 +29,7 @@ ifneq ($(DEVEL), 1)
     CFLAGS += -O2
 endif
 
-CFLAGS += -Wall -Werror -std=c99 $(shell pkg-config --cflags $(PACKAGES))
+CFLAGS += -D_GNU_SOURCE -Wall -std=c99 $(shell pkg-config --cflags $(PACKAGES))
 
 ifeq ($(STATIC), 1)
     # The right thing to do here is `pkg-config --libs --static`, which would

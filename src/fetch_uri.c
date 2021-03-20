@@ -22,11 +22,13 @@
 #include <glib.h>
 #include <glib/gprintf.h>
 #include <gio/gio.h>
+#include <gio/gunixoutputstream.h>
 #include <fcntl.h>
 #include <archive.h>
 #include <archive_entry.h>
 #include <unistd.h>
 #include <curl/curl.h>
+#include <sys/mman.h>
 
 #include "fetch.h"
 #include "fetch_uri.h"
@@ -45,37 +47,16 @@ struct socket_data {
 static size_t cwrite_callback(char *ptr, size_t size, size_t nmemb,
                               void *userdata)
 {
-    GMemoryInputStream *stream = (GMemoryInputStream *)userdata;
-
-    g_memory_input_stream_add_data(stream, g_memdup(ptr, size * nmemb),
-                                   size * nmemb, g_free);
+    g_output_stream_write_all(userdata, ptr, size * nmemb, NULL, NULL, NULL);
 
     return size * nmemb;
-}
-
-static ssize_t
-myread(struct archive *a, void *client_data, const void **abuf)
-{
-    FetchData *fetch_data = client_data;
-    gsize len = 0;
-    *abuf = fetch_data->buf;
-
-    GError *error = NULL;
-
-    len = g_input_stream_read (fetch_data->istream, fetch_data->buf, sizeof (fetch_data->buf),
-                               NULL, &error);
-
-    if (error) {
-        archive_set_error(fetch_data->a, error->code, "%s", error->message);
-        return -1;
-    }
-
-    return len;
 }
 
 static gboolean
 myopen(FetchData *fetch_data, GError **error)
 {
+    int fd;
+
     g_return_val_if_fail(fetch_data != NULL, FALSE);
     g_return_val_if_fail(error == NULL || *error == NULL, FALSE);
     CURLMcode res;
@@ -84,10 +65,12 @@ myopen(FetchData *fetch_data, GError **error)
     CURL *curl = curl_easy_init();
     gchar *uri = soup_uri_to_string(fetch_data->url, FALSE);
 
-    fetch_data->istream = g_memory_input_stream_new();
+    fd = memfd_create("restraint_fetch_uri", MFD_CLOEXEC);
+
+    fetch_data->ostream = G_OUTPUT_STREAM(g_unix_output_stream_new(fd, TRUE));
     curl_easy_setopt(curl, CURLOPT_URL, uri);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, cwrite_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, fetch_data->istream);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, fetch_data->ostream);
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, fetch_data->curl_error_buf);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1);
 
@@ -106,23 +89,6 @@ myopen(FetchData *fetch_data, GError **error)
     }
 
     return TRUE;
-}
-
-static int
-myclose(struct archive *a, void *client_data)
-{
-    FetchData *fetch_data = client_data;
-    GError * error = NULL;
-
-    g_input_stream_close(fetch_data->istream,
-                      NULL,
-                      &error);
-    g_object_unref(fetch_data->istream);
-    if (error != NULL) {
-        archive_set_error(fetch_data->a, error->code, "%s", error->message);
-        return ARCHIVE_FATAL;
-    }
-    return ARCHIVE_OK;
 }
 
 static gboolean
@@ -144,9 +110,19 @@ archive_finish_callback (gpointer user_data)
             g_warning("Failed to free archive_write_disk");
     }
     if (fetch_data->a != NULL) {
+        free_result = archive_read_close(fetch_data->a);
+        if (free_result != ARCHIVE_OK)
+            g_warning("Failed to close archive");
         free_result = archive_read_free(fetch_data->a);
         if (free_result != ARCHIVE_OK)
             g_warning("Failed to free archive_read");
+    }
+    if (fetch_data->ostream != NULL) {
+        GError *error = NULL;
+        if (!g_output_stream_close(fetch_data->ostream, NULL, &error))
+            g_warning("Failed to close stream");
+        g_clear_error(&error);
+        g_clear_object(&fetch_data->ostream);
     }
 
     if (fetch_data->finish_callback) {
@@ -372,6 +348,7 @@ static int update_timeout_cb(CURLM *multi,    /* multi handle */
 static gboolean start_unpack(gpointer data)
 {
     FetchData *fetch_data = data;
+    int fd;
     struct curl_data *cd = fetch_data->private_data;
 
     if (cd->running > 0) {
@@ -379,7 +356,9 @@ static gboolean start_unpack(gpointer data)
     }
 
     gint r;
-    r = archive_read_open(fetch_data->a, fetch_data, NULL, myread, myclose);
+    fd = g_unix_output_stream_get_fd(G_UNIX_OUTPUT_STREAM(fetch_data->ostream));
+    lseek(fd, 0, SEEK_SET);
+    r = archive_read_open_fd(fetch_data->a, fd, 16384);
     if (r != ARCHIVE_OK) {
         g_set_error(&fetch_data->error, RESTRAINT_FETCH_LIBARCHIVE_ERROR, r,
                 "archive_read_open failed: %s", archive_error_string(fetch_data->a));
