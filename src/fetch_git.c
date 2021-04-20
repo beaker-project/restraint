@@ -118,7 +118,7 @@ packet_write(GOutputStream *ostream, GError **error,
 
     va_list args;
     va_start(args, fmt);
-    gchar *buffer = NULL;
+    g_autofree gchar *buffer = NULL;
     gint n = g_vasprintf(&buffer, fmt, args);
     va_end(args);
     if (n < 0)
@@ -131,7 +131,7 @@ packet_write(GOutputStream *ostream, GError **error,
         g_set_error(error, RESTRAINT_FETCH_ERROR,
                 RESTRAINT_FETCH_GIT_PROTOCOL_ERROR,
                 "protocol error: impossibly long line (%d bytes)", n);
-        goto error;
+        return FALSE;
     }
     GError *tmp_error = NULL;
     gsize bytes_written = 0;
@@ -139,21 +139,15 @@ packet_write(GOutputStream *ostream, GError **error,
             HDR_LEN_SIZE, &bytes_written, NULL, &tmp_error);
     if (!write_succeeded) {
         g_propagate_error(error, tmp_error);
-        goto error;
+        return FALSE;
     }
     write_succeeded = g_output_stream_write_all(ostream, buffer,
             (gsize) n - HDR_LEN_SIZE, &bytes_written, NULL, &tmp_error);
     if (!write_succeeded) {
         g_propagate_error(error, tmp_error);
-        goto error;
+        return FALSE;
     }
-    g_free(buffer);
     return TRUE;
-
-error:
-    if (buffer != NULL)
-        g_free(buffer);
-    return FALSE;
 }
 
 static ssize_t
