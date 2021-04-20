@@ -104,7 +104,6 @@ fetch_finish_callback (GError *error, guint32 match_cnt,
 {
     AppData *app_data = (AppData *) user_data;
     Task *task = (Task *) app_data->tasks->data;
-    GString *message = g_string_new (NULL);
 
     if (error) {
         if (app_data->fetch_retries < TASK_FETCH_RETRIES) {
@@ -121,11 +120,12 @@ fetch_finish_callback (GError *error, guint32 match_cnt,
         task->state = TASK_METADATA_PARSE;
 
         if ((match_cnt > 0) || (nonmatch_cnt > 0)) {
+            g_autoptr (GString) message = g_string_new (NULL);
+
             g_string_printf (message, "** Fetch Summary: Match %d, "
                              "Nonmatch %d\n",
                              match_cnt, nonmatch_cnt);
             restraint_log_task (app_data, RSTRNT_LOG_TYPE_HARNESS, message->str, message->len);
-            g_string_free (message, TRUE);
         }
     }
 
