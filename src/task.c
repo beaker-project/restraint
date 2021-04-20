@@ -667,7 +667,7 @@ restraint_task_result (Task *task, AppData *app_data, gchar *result,
 {
     g_return_if_fail(task != NULL);
 
-    gchar *score = g_strdup_printf("%d", int_score);
+    g_autofree gchar *score = g_strdup_printf("%d", int_score);
     SoupURI *task_results_uri;
     SoupMessage *server_msg;
 
@@ -689,7 +689,6 @@ restraint_task_result (Task *task, AppData *app_data, gchar *result,
                                 "message", message, NULL);
         g_message("%s task %s due to : %s", result, task->task_id, message);
     }
-    g_free (score);
     soup_message_set_request(server_msg, "application/x-www-form-urlencoded",
             SOUP_MEMORY_TAKE, data, strlen(data));
 
