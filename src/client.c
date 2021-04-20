@@ -806,14 +806,13 @@ gboolean
 remote_io_callback (GIOChannel *io, GIOCondition condition, gpointer user_data) {
     GError *tmp_error = NULL;
 
-    gchar *s;
+    g_autofree gchar *s = NULL;
     gsize bytes_read;
 
     if (condition & G_IO_IN) {
         switch (g_io_channel_read_line(io, &s, &bytes_read, NULL, &tmp_error)) {
           case G_IO_STATUS_NORMAL:
             handle_message(s, user_data);
-            g_free(s);
             return TRUE;
 
           case G_IO_STATUS_ERROR:
