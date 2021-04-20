@@ -1387,6 +1387,7 @@ static gchar *copy_job_as_template(gchar *job, gboolean novalid,
                 g_printerr ("Unable to find matching host for recipe id:%s did you pass --host on the cmd line?\n", id);
                 xmlFreeDoc(template_xml_doc_ptr);
                 xmlXPathFreeObject(recipe_nodes);
+                xmlXPathFreeObject(recipeset_nodes);
                 g_hash_table_destroy(posroles);
                 return NULL;
             }
