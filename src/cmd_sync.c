@@ -249,7 +249,7 @@ static int listen_remote(void)
  */
 void handler(void)
 {
-  struct sdata *sd = g_new0(struct sdata, 1);
+  g_autofree struct sdata *sd = g_new0(struct sdata, 1);
   sd->events = g_hash_table_new_full(g_str_hash, g_str_equal,
                                      g_free, NULL);
   int lsock, rsock;
@@ -277,13 +277,12 @@ void handler(void)
 
   g_main_loop_run(mloop);
 
-  g_hash_table_destroy(sd->events);
-  g_slist_free_full(sd->wlist, (GDestroyNotify)wentry_free);
-  g_free(sd);
   close(rsock);
 rerror:
   close(lsock);
 lerror:
+  g_hash_table_destroy(sd->events);
+  g_slist_free_full(sd->wlist, (GDestroyNotify)wentry_free);
   unlink(USOCKET_PATH);
   return;
 }
