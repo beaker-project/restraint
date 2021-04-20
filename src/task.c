@@ -708,8 +708,6 @@ restraint_task_status (Task *task, AppData *app_data, gchar *status,
 
     SoupURI *task_status_uri;
     SoupMessage *server_msg;
-    gchar *stime = g_strdup_printf("%ld", task->starttime);
-    gchar *etime = g_strdup_printf("%ld", task->endtime);
 
     task_status_uri = soup_uri_new_with_base(task->task_uri, "status");
     server_msg = soup_message_new_from_uri("POST", task_status_uri);
@@ -718,6 +716,8 @@ restraint_task_status (Task *task, AppData *app_data, gchar *status,
     g_return_if_fail(server_msg != NULL);
 
     gchar *data = NULL;
+    g_autofree gchar *stime = g_strdup_printf("%ld", task->starttime);
+    g_autofree gchar *etime = g_strdup_printf("%ld", task->endtime);
     GHashTable *data_table = g_hash_table_new (NULL, NULL);
     g_hash_table_insert(data_table, "status", status);
     g_hash_table_insert(data_table, "stime", stime);
@@ -735,8 +735,6 @@ restraint_task_status (Task *task, AppData *app_data, gchar *status,
             SOUP_MEMORY_TAKE, data, strlen(data));
 
     g_hash_table_destroy(data_table);
-    g_free(etime);
-    g_free(stime);
 
     app_data->queue_message(soup_session,
                             server_msg,
