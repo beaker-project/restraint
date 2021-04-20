@@ -1714,7 +1714,7 @@ parse_host (const gchar *connect_uri)
 {
     GMatchInfo  *match_info;
     GRegex      *regex;
-    gchar      **ssh_destination;
+    g_auto (GStrv) ssh_destination = NULL;
 
     g_return_val_if_fail (connect_uri != NULL, NULL);
 
@@ -1744,13 +1744,12 @@ parse_host (const gchar *connect_uri)
         g_free (deprecated);
     } else {
         g_printerr ("Malformed host: %s, see help for reference\n", connect_uri);
-        ssh_destination = NULL;
     }
 
     g_match_info_free (match_info);
     g_regex_unref (regex);
 
-    return ssh_destination;
+    return g_steal_pointer (&ssh_destination);
 }
 
 static gboolean
