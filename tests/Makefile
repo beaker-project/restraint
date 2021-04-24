@@ -21,8 +21,6 @@ SRC_DIR = $(abspath ../src)
 CFLAGS ?= -Og -g
 CFLAGS += -iquote $(SRC_DIR)
 CFLAGS += -Wall -Werror -std=c99 $(shell pkg-config --cflags $(PACKAGES))
-# Keep this until we have Glib 2.68 in third-party module
-CFLAGS += -Wno-deprecated-declarations
 
 ifeq ($(COVERAGE), 1)
     CFLAGS += --coverage

@@ -30,8 +30,6 @@ ifneq ($(DEVEL), 1)
 endif
 
 CFLAGS += -Wall -Werror -std=c99 $(shell pkg-config --cflags $(PACKAGES))
-# Keep this until we have Glib 2.68 in third-party module
-CFLAGS += -Wno-deprecated-declarations
 
 ifeq ($(STATIC), 1)
     # The -( -) grouping means we don't have to worry about getting all the
