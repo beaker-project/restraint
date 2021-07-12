@@ -44,6 +44,8 @@
 #define TASK_FETCH_INTERVAL 10
 #define TASK_FETCH_RETRIES 3
 
+extern GList *curr_task;
+
 typedef enum {
     TASK_IDLE,
     TASK_FETCH,
@@ -65,6 +67,12 @@ typedef enum {
     TASK_FETCH_INSTALL_PACKAGE,
     TASK_FETCH_UNPACK,
 } TaskFetchMethod;
+
+typedef enum {
+    TASK_PARALLEL,
+    TASK_PRE,
+    TASK_POST,
+} TaskParallelType;
 
 typedef struct RstrntTask {
     /* Beaker ID for this task */
@@ -123,23 +131,39 @@ typedef struct RstrntTask {
     /* Start stop times */
     time_t starttime;
     time_t endtime;
+	/* task conflict state */
+    gboolean conflicted;
 } Task;
 
-typedef struct {
+//per-thread specified data
+typedef struct TaskThreadData {
     AppData *app_data;
+    GMainContext *ctxt;
+    Task *task;
+    GMainLoop *loop;
+} ThreadData;
+
+typedef struct {
+    ThreadData *thrdata;
     TaskSetupState pass_state;
     TaskSetupState fail_state;
     gchar expire_time[80];
     RstrntLogType log_type;
+    guint overload;
 } TaskRunData;
+
+typedef struct {
+	gboolean blocked;
+	char *text;
+} KeywordInfo;
 
 Task *restraint_task_new(void);
 gboolean task_handler (gpointer user_data);
 void task_finish (gpointer user_data);
 void
-restraint_task_fetch(AppData *app_data);
+restraint_task_fetch(ThreadData *thrdata);
 gboolean restraint_build_env(Task *task, GError **error);
-void restraint_task_status (Task *task, AppData *app_data, gchar *, gchar *, GError *reason);
+void restraint_task_status (Task *task, ThreadData *thrdata, gchar *, gchar *, GError *reason);
 void restraint_task_run(Task *task);
 void restraint_task_free(Task *task);
 goffset *restraint_task_get_offset (Task *task, const gchar *path);
@@ -150,8 +174,8 @@ gboolean idle_task_setup (gpointer user_data);
 
 gboolean task_config_set_offset (const gchar *config_file, Task *task, const gchar *path, goffset value, GError **error);
 
-void restraint_log_task (AppData *app_data, RstrntLogType type, const char *data, gsize size);
-
 extern SoupSession *soup_session;
 
+void restraint_log_task (ThreadData *thrdata, RstrntLogType type, const char *data, gsize size);
+extern guint64 nproc;
 #endif

@@ -251,6 +251,29 @@ restraint_parse_metadata (gchar *filename,
     }
     g_clear_error (&tmp_error);
 
+    gchar **conflicts = g_key_file_get_locale_string_list(keyfile,
+                                                         "restraint",
+                                                         "Conflict",
+                                                         locale,
+                                                         &length,
+                                                         &tmp_error);
+    gchar **conflict = conflicts;
+    if (conflict) {
+      while (*conflict) {
+        metadata->conflict_kywds = g_slist_prepend (metadata->conflict_kywds, g_strdup(*conflict));
+        conflict++;
+      }
+      g_strfreev (conflicts);
+    }
+    else
+      metadata->conflict_kywds = NULL;
+
+    if (tmp_error && tmp_error->code != G_KEY_FILE_ERROR_KEY_NOT_FOUND) {
+        g_propagate_error(error, tmp_error);
+        goto error;
+    }
+    g_clear_error (&tmp_error);
+
     g_key_file_free(keyfile);
 
     return metadata;
@@ -326,6 +349,20 @@ static void parse_line(MetaData *metadata,
             metadata->envvars = g_slist_prepend(metadata->envvars, p);
         }
         g_strfreev(envvar);
+    } else if(g_strcmp0("CONFLICT", key) == 0) {
+        gchar **conflicts = g_strsplit_set (value,", ", -1);
+        gchar **conflict = conflicts;
+        if (conflict) {
+            while (*conflict) {
+                if (g_strcmp0 (*conflict, "") != 0) {
+                    metadata->conflict_kywds = g_slist_prepend (metadata->conflict_kywds, g_strdup(*conflict));
+                }
+                conflict++;
+            }
+            // We only want to free the array not the values that it's pointing to
+            g_strfreev (conflicts);
+        } else
+            metadata->conflict_kywds = NULL;
     }
     g_free(key);
     g_free(value);

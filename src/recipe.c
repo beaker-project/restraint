@@ -32,6 +32,9 @@
 #include "xml.h"
 #include "beaker_harness.h"
 
+GThreadPool *pool;
+guint test_round;
+
 GQuark restraint_recipe_parse_error_quark(void) {
     return g_quark_from_static_string("restraint-recipe-parse-error-quark");
 }
@@ -397,9 +400,24 @@ void restraint_recipe_free(Recipe *recipe) {
     g_free(recipe->base_path);
     soup_uri_free(recipe->recipe_uri);
     g_list_free_full(recipe->tasks, (GDestroyNotify) restraint_task_free);
+    g_list_free_full(recipe->pre_tasks, (GDestroyNotify) restraint_task_free);
+    g_list_free_full(recipe->parallel_tasks, (GDestroyNotify) restraint_task_free);
+    g_list_free_full(recipe->post_tasks, (GDestroyNotify) restraint_task_free);
     g_list_free_full(recipe->params, (GDestroyNotify) restraint_param_free);
     g_list_free_full(recipe->roles, (GDestroyNotify) restraint_role_free);
     g_slice_free(Recipe, recipe);
+}
+
+static void parallel_opt_parse(Param *param, guint *type)
+{
+    if (g_strcmp0((gchar *)param->name, "RSTRNT_PARALLEL") == 0) {
+        if (g_strcmp0((gchar *)param->value, "parallel") == 0)
+            *type = TASK_PARALLEL;
+        else if (g_strcmp0((gchar *)param->value, "post") == 0)
+            *type = TASK_POST;
+        else
+            *type = TASK_PRE;
+    }
 }
 
 static Recipe *
@@ -457,6 +475,10 @@ recipe_parse (xmlDoc *doc, SoupURI *recipe_uri, GError **error, gchar **cfg_file
 
 
     GList *tasks = NULL;
+    GList *pre_tasks = NULL;
+    GList *post_tasks = NULL;
+    GList *parallel_tasks = NULL;
+    guint parallel_type = TASK_PRE; //default pre tasks
     xmlNode *child = recipe->children;
     while (child != NULL) {
         if (child->type == XML_ELEMENT_NODE &&
@@ -469,6 +491,20 @@ recipe_parse (xmlDoc *doc, SoupURI *recipe_uri, GError **error, gchar **cfg_file
             /* link task to recipe for additional attributes */
             task->recipe = result;
             task->order = i++*2;
+            parallel_type = TASK_PRE;
+            g_list_foreach(task->params, (GFunc) parallel_opt_parse, &parallel_type);
+            if (parallel_type == TASK_PRE) {
+                pre_tasks = g_list_prepend(pre_tasks, task);
+                g_print("pre task %s added\n", task->task_id);
+            }
+            else if (parallel_type == TASK_POST) {
+                post_tasks = g_list_prepend(post_tasks, task);
+                g_print("post task %s added\n", task->task_id);
+            }
+            else {
+                parallel_tasks = g_list_prepend(parallel_tasks, task);
+                g_print("parallel task %s added\n", task->task_id);
+            }
             tasks = g_list_prepend(tasks, task);
         } else
         if (child->type == XML_ELEMENT_NODE &&
@@ -494,8 +530,14 @@ recipe_parse (xmlDoc *doc, SoupURI *recipe_uri, GError **error, gchar **cfg_file
         child = child->next;
     }
     tasks = g_list_reverse(tasks);
+    parallel_tasks = g_list_reverse(parallel_tasks);
+    pre_tasks = g_list_reverse(pre_tasks);
+    post_tasks = g_list_reverse(post_tasks);
 
     result->tasks = tasks;
+    result->pre_tasks = pre_tasks;
+    result->post_tasks = post_tasks;
+    result->parallel_tasks = parallel_tasks;
     return result;
 
 error:
@@ -545,6 +587,191 @@ restraint_recipe_parse_stream (GInputStream *stream, gpointer user_data)
     restraint_xml_parse_from_stream(stream, app_data->recipe_url, fetch_completed, app_data);
 }
 
+void thread_loop_run(gpointer push_data, gpointer user_data)
+{
+	AppData *app_data = (AppData *) user_data;
+	ThreadData *thrdata = g_slice_new0(ThreadData);
+	thrdata->app_data = app_data;
+	GSource *source;
+	GMainContext *ctxt;
+	GMainLoop *loop;
+	static GMutex task_sync;
+
+	source = g_idle_source_new();
+	ctxt = g_main_context_new();
+	g_source_attach(source, ctxt);
+	thrdata->ctxt = ctxt;
+	loop = g_main_loop_new(ctxt, FALSE);
+	thrdata->loop = loop;
+
+	g_mutex_lock(&task_sync);
+	if (curr_task == NULL) {
+		g_mutex_unlock(&task_sync);
+		return;
+        }
+
+	thrdata->task = curr_task->data;
+	curr_task = g_list_next(curr_task);
+	g_mutex_unlock(&task_sync);
+
+	g_source_set_callback(source, task_handler, thrdata, NULL);
+	g_main_loop_run(loop);
+}
+
+void thread_loop_stop(gpointer user_data)
+{
+	ThreadData *thrdata = (ThreadData *) user_data;
+	g_main_loop_quit(thrdata->loop);
+}
+
+static void restraint_multithread_push(gpointer user_data, GList *tasks, GThreadPool *pool, guint thr_num)
+{
+	guint i;
+	AppData *app_data = (AppData *) user_data;
+
+	curr_task = tasks;
+	if (g_list_length(tasks) == 0)
+	{
+		if (test_round == 2)
+			app_data->state = RECIPE_COMPLETE;
+		else {
+			app_data->state = RECIPE_RUN;
+			test_round++;
+		}
+		return;
+	} else
+		app_data->state = RECIPE_RUNNING;
+
+	for (i = 0; i < thr_num; i++) {
+		g_thread_pool_push(pool, app_data, NULL);
+	}
+}
+
+// /proc/loadavg's 1min, /proc/stat's iowait, /proc/meminfo's available
+gboolean load_eval()
+{
+    GFile *file;
+    GFileInputStream *fis;
+    GError *tmp_err;
+    gchar **result;
+    gchar *total, *available;
+    gchar buf[2048];
+    gint i, j;
+    gint64 sum = 0, curr_sum, delta_sum;
+    gint64 idle, curr_idle, delta_idle;
+    gint64 iowait, curr_iowait, delta_iowait;
+    gfloat loadavg1min;
+    guint64 tot;
+    guint64 ava;
+    gboolean overload = false;
+
+    file = g_file_new_for_path("/proc/loadavg");
+    fis = g_file_read(file, NULL, &tmp_err);
+    g_input_stream_read(G_INPUT_STREAM(fis), buf, 1024, NULL, &tmp_err);
+    result = g_strsplit_set(buf , " \n", -1);
+    loadavg1min = g_ascii_strtod(*result, NULL);
+    g_print("last 1min loadavg is %.2f, nproc is %lu\n", loadavg1min, nproc);
+    if (loadavg1min - nproc > -2) // less than 2 cores available
+    {
+	    overload = true;
+	    goto clean;
+    }
+
+    g_strfreev(result);
+    g_input_stream_close(G_INPUT_STREAM(fis), NULL, NULL);
+    g_object_unref(fis);
+    g_object_unref(file);
+
+    file = g_file_new_for_path("/proc/meminfo");
+    fis = g_file_read(file, NULL, &tmp_err);
+    g_input_stream_read(G_INPUT_STREAM(fis), buf, 1024, NULL, &tmp_err);
+    result = g_strsplit_set(buf , ":\n", -1);
+    total = *(result + 1);
+    g_strstrip(total);
+    total = *g_strsplit(total , " ", -1);
+    available = *(result + 5);
+    g_strstrip(available);
+    available = *g_strsplit(available , " ", -1);
+    tot = g_ascii_strtoull(total, NULL, BASE10);
+    ava = g_ascii_strtoull(available, NULL, BASE10);
+
+    gfloat percent = (gfloat)ava / (gfloat)tot;
+    g_print("total mem is                    %lu\n", tot);
+    g_print("available mem is                %lu\n", ava);
+    g_print("available mem percent is        %.2f\n", percent);
+
+    if ( percent < 0.4 || ava < 2097152) // available memory lower than 40% or less than 2G
+	overload = true;
+
+clean:
+    g_strfreev(result);
+    g_input_stream_close(G_INPUT_STREAM(fis), NULL, NULL);
+    g_object_unref(fis);
+    g_object_unref(file);
+
+    if (overload)
+        return true;
+
+    for (i = 0; i < 4; i++) // read stat every second for a total of four times, so finally do it
+    {
+
+        file = g_file_new_for_path("/proc/stat");
+        fis = g_file_read(file, NULL, NULL);
+        g_input_stream_read(G_INPUT_STREAM(fis), buf, 1024, NULL, NULL);
+        result = g_strsplit_set(buf , " \n", -1);
+        result += 5;// 4th idle
+        curr_idle = g_ascii_strtoull(*result, NULL, BASE10);
+        result += 1;// 5th iowait
+        curr_iowait = g_ascii_strtoull(*result, NULL, BASE10);
+
+        result -= 6;
+        g_strfreev(result);
+
+        result = g_strsplit_set(buf, " \n", -1);
+        result += 2;// 1st-10th user, nice, system, idle, iowait, irq, softirq, stral, guest, guest_nice
+        curr_sum = 0;
+        for (j = 0; j < 10; j ++)
+            curr_sum += g_ascii_strtoull(*result++, NULL, BASE10);
+        result -= 12;
+
+        if (sum == 0)// initialization
+            goto done;
+
+        delta_iowait = curr_iowait - iowait;
+        delta_sum = curr_sum - sum;
+        delta_idle = curr_idle - idle;
+
+        g_print("last1s cpu sum %ld\n", delta_sum);
+        g_print("last1s iowait %ld\n", delta_iowait);
+        g_print("last1s idle %ld\n", delta_idle);
+
+        if ((gfloat)delta_iowait / (gfloat)delta_sum > 0.4) // iowait percent more than 40%
+        {
+	    overload = true;
+	    goto clean;
+        }
+        if ((gfloat)delta_idle / (gfloat)delta_sum < 0.3) // idle/available cpu time less than 30%
+	{
+	    overload = true;
+	    goto clean;
+	}
+
+done:
+        iowait = curr_iowait;
+        sum = curr_sum;
+        idle = curr_idle;
+
+        g_strfreev(result);
+        g_input_stream_close(G_INPUT_STREAM(fis), NULL, NULL);
+        g_object_unref(fis);
+        g_object_unref(file);
+
+        g_usleep(G_USEC_PER_SEC);
+    }
+
+    return false;
+}
+
 gboolean
 recipe_handler (gpointer user_data)
 {
@@ -572,10 +799,17 @@ recipe_handler (gpointer user_data)
                                             &app_data->error, &app_data->config_file);
             if (app_data->recipe && ! app_data->error) {
                 app_data->tasks = app_data->recipe->tasks;
+                app_data->pre_tasks = app_data->recipe->pre_tasks;
+                app_data->post_tasks = app_data->recipe->post_tasks;
+                app_data->parallel_tasks = app_data->recipe->parallel_tasks;
                 app_data->state = RECIPE_RUN;
             } else {
                 app_data->state = RECIPE_COMPLETE;
             }
+            guint max_thr = nproc;
+            if (max_thr > 32)
+                max_thr = 32;
+	    pool = g_thread_pool_new(thread_loop_run, app_data, max_thr, FALSE, NULL);
             break;
         case RECIPE_RUN:
             if (app_data->recipe_url) {
@@ -586,15 +820,17 @@ recipe_handler (gpointer user_data)
                                       G_TYPE_STRING,
                                       app_data->recipe_url);
             }
-            app_data->task_handler_id = g_idle_add_full(G_PRIORITY_DEFAULT_IDLE,
-                                                        task_handler,
-                                                        app_data,
-                                                        NULL);
-            g_string_printf(message, "* Running recipe\n");
-            app_data->state = RECIPE_RUNNING;
+
+            if (test_round == 0)
+	        restraint_multithread_push(app_data, app_data->pre_tasks, pool, 1);
+            else if (test_round == 1)
+	        restraint_multithread_push(app_data, app_data->parallel_tasks, pool, 32);
+            else if (test_round == 2)
+	        restraint_multithread_push(app_data, app_data->post_tasks, pool, 1);
+            g_string_printf(message, "* Running recipe, %d\n", test_round);
             break;
         case RECIPE_RUNNING:
-            result = FALSE;
+	    result = FALSE;
             break;
         case RECIPE_COMPLETE:
             if (app_data->error) {

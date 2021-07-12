@@ -45,6 +45,8 @@ upload_chunk (SoupSession *session,
         g_propagate_error (error, tmp_error);
         return -1;
     }
+    gchar* index = getenv("RSTRNT_INDEX");
+
     if (bytes_read > 0) {
         server_msg = soup_message_new_from_uri ("PUT", result_log_uri);
         range = g_strdup_printf ("bytes %" G_GSSIZE_FORMAT "-%" G_GSSIZE_FORMAT "/%" G_GUINT64_FORMAT,
@@ -53,6 +55,7 @@ upload_chunk (SoupSession *session,
                                  filesize);
         offset += bytes_read;
         soup_message_headers_append (server_msg->request_headers, "Content-Range", range);
+        soup_message_headers_append (server_msg->request_headers, "task-index", index);
         g_free (range);
         soup_message_set_request (server_msg, "text/plain", SOUP_MEMORY_COPY, input_buf, bytes_read);
         ret = soup_session_send_message (session, server_msg);

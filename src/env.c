@@ -73,7 +73,7 @@ static void build_param_var(Param *param, GPtrArray *env) {
     g_ptr_array_add(env, g_strdup_printf("%s=%s", param->name, param->value));
 }
 
-void build_env(gchar *restraint_url, guint port, Task *task) {
+void build_env(gchar *restraint_url, guint port, Task *task, AppData *app_data) {
     GPtrArray *env = g_ptr_array_new_with_free_func (g_free);
     GError *error = NULL;
 
@@ -90,6 +90,7 @@ void build_env(gchar *restraint_url, guint port, Task *task) {
     gchar **hostarr = g_new0(gchar *, g_slist_length(rmembers) + 1);
     gchar **p = hostarr;
     gchar *hoststr = NULL;
+    gchar *index = NULL;
 
     for (GSList *host = rmembers; host != NULL; host = g_slist_next(host)) {
       *p++ = host->data;
@@ -146,6 +147,10 @@ void build_env(gchar *restraint_url, guint port, Task *task) {
     g_ptr_array_add(env, g_strdup_printf("TERM=vt100"));
     g_ptr_array_add(env, g_strdup_printf("LANG=en_US.UTF-8"));
     g_ptr_array_add(env, g_strdup_printf("PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"));
+
+    //index of task in the list.
+    index = g_strdup_printf("%d", g_list_index(app_data->tasks, task));
+    array_add (env, prefix, "INDEX", index);
 
     // Override with recipe level params
     g_list_foreach(task->recipe->params, (GFunc) build_param_var, env);

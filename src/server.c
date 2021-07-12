@@ -38,6 +38,7 @@
 SoupSession *soup_session;
 GMainLoop *loop;
 char *strsignal(int sig);
+guint64 nproc;
 
 static void
 copy_header (SoupURI *uri, const char *name, const char *value, gpointer dest_headers)
@@ -127,7 +128,8 @@ server_io_callback (GIOChannel *io, GIOCondition condition, gpointer user_data) 
             if (!app_data->stdin)
                 g_print ("%s", buf);
 
-            restraint_log_task (app_data, RSTRNT_LOG_TYPE_HARNESS, buf, bytes_read);
+	    // FIXME pass per-task data to it
+            //restraint_log_task (app_data, RSTRNT_LOG_TYPE_HARNESS, buf, bytes_read);
 
             return G_SOURCE_CONTINUE;
 
@@ -177,7 +179,7 @@ server_msg_complete (SoupSession *session, SoupMessage *server_msg, gpointer use
     ClientData *client_data = (ClientData *) user_data;
     AppData *app_data = (AppData *) client_data->user_data;
     SoupMessage *client_msg = client_data->client_msg;
-    Task *task = app_data->tasks->data;
+    Task *task;
     GHashTable *table;
     gboolean no_plugins = FALSE;
     SoupMessageHeadersIter iter;
@@ -201,6 +203,8 @@ server_msg_complete (SoupSession *session, SoupMessage *server_msg, gpointer use
         // reported from the plugins themselves.
         table = soup_form_decode (client_msg->request_body->data);
         no_plugins = g_hash_table_lookup_extended (table, "no_plugins", NULL, NULL);
+	const gchar *index = soup_message_headers_get_one(client_msg->request_headers, "task-index");
+        task = g_list_nth_data(app_data->tasks, g_ascii_strtoll(index, NULL, BASE10));
 
         // Execute report plugins
         if (!no_plugins) {
@@ -285,7 +289,12 @@ server_recipe_callback (SoupServer *server, SoupMessage *client_msg,
         return;
     }
     // FIXME - make sure we have valid tasks first
-    Task *task = (Task *) app_data->tasks->data;
+    const gchar *index = soup_message_headers_get_one(client_msg->request_headers, "task-index");
+    Task *task = g_list_nth_data(app_data->tasks, g_ascii_strtoll(index, NULL, BASE10));
+    if (task == NULL) {
+            g_print("you must specify with RSTRNT_INDEX\n");
+            return;
+    }
 
     if (g_str_has_suffix (path, "/results/")) {
         server_uri = soup_uri_new_with_base (task->task_uri, "results/");
@@ -658,6 +667,16 @@ rstrnt_uploader_override (AppData *app_data)
     g_debug ("%s(): Log manager upload interval overridden to %d", __func__, interval);
 
     app_data->uploader_interval = interval;
+
+}
+
+void get_nproc()
+{
+    gchar *output = NULL;
+
+    g_spawn_command_line_sync("nproc", &output, NULL, NULL, NULL);
+    g_strstrip(output);
+    nproc = g_ascii_strtoull(output, NULL, BASE10);
 }
 
 int main(int argc, char *argv[]) {
@@ -691,6 +710,8 @@ int main(int argc, char *argv[]) {
   if (!parse_succeeded) {
     exit (PARSE_ARGS_FAILED);
   }
+
+  get_nproc();
 
   if (!app_data->stdin) {
       app_data->config_file = g_build_filename (VAR_LIB_PATH, config, NULL);

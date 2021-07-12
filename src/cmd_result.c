@@ -281,6 +281,7 @@ gboolean upload_results(AppData *app_data) {
 
     g_hash_table_insert (data_table, "path", app_data->test_name);
     g_hash_table_insert (data_table, "result", app_data->test_result);
+    gchar *index = getenv("RSTRNT_INDEX");
 
     // if AVC_ERROR=+no_avc_check then disable the selinux check plugin
     // This is for legacy rhts tests.. please use --disable-plugin
@@ -304,6 +305,8 @@ gboolean upload_results(AppData *app_data) {
     request = (SoupRequest *)soup_session_request_http_uri (session, "POST", result_uri, &error);
     server_msg = soup_request_http_get_message (SOUP_REQUEST_HTTP (request));
     g_object_unref(request);
+    soup_message_headers_append(server_msg->request_headers, "task-index", index);
+
     form_data = soup_form_encode_hash (data_table);
     soup_message_set_request (server_msg, "application/x-www-form-urlencoded",
                               SOUP_MEMORY_TAKE, form_data, strlen (form_data));

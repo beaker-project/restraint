@@ -50,6 +50,9 @@ typedef struct {
     gchar *owner;
     gchar *base_path;
     GList *tasks; // list of Task *
+    GList *parallel_tasks; // list of Task *
+    GList *pre_tasks; // list of Pre_Task *
+    GList *post_tasks; // list of Post_Task *
     GList *params; // list of Params
     GList *roles; // list of Roles
     SoupURI *recipe_uri;
@@ -67,5 +70,8 @@ void restraint_recipe_update_roles(Recipe *recipe, xmlDoc *doc, GError **error);
 void restraint_recipe_free(Recipe *recipe);
 void recipe_handler_finish (gpointer user_data);
 gboolean recipe_wait_on_beaker (const gchar *recipe_url, const gchar *state_tag);
+gboolean load_eval();
+guint test_round;
+void thread_loop_stop(gpointer user_data);
 
 #endif

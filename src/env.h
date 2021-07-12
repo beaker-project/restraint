@@ -20,6 +20,6 @@
 
 #include "task.h"
 
-void build_env(gchar *restraint_url, guint port, Task *task);
+void build_env(gchar *restraint_url, guint port, Task *task, AppData *app_data);
 
 #endif

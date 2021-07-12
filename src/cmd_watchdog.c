@@ -120,6 +120,8 @@ upload_watchdog (WatchdogAppData *app_data, GError **error)
         result = FALSE;
         goto cleanup;
     }
+    gchar* index = getenv("RSTRNT_INDEX");
+
     session = soup_session_new_with_options("timeout", 3600, NULL);
     SoupMessage *server_msg = soup_message_new_from_uri ("POST", watchdog_uri);
     form_seconds = g_strdup_printf ("%" G_GUINT64_FORMAT, app_data->seconds);
@@ -128,6 +130,7 @@ upload_watchdog (WatchdogAppData *app_data, GError **error)
     g_free (form_seconds);
     soup_message_set_request (server_msg, "application/x-www-form-urlencoded",
                               SOUP_MEMORY_TAKE, form_data, strlen (form_data));
+    soup_message_headers_append(server_msg->request_headers, "task-index", index);
 
     ret = soup_session_send_message (session, server_msg);
     if (SOUP_STATUS_IS_SUCCESSFUL (ret)) {

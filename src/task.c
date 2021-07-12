@@ -46,18 +46,23 @@
 #include "xml.h"
 #include "logging.h"
 
+GList *curr_task;
+static GList *global_confkywds;
+
 void
-restraint_task_result (Task *task, AppData *app_data, gchar *result,
+restraint_task_result (Task *task, ThreadData *thrdata, gchar *result,
                        gint int_score, gchar *path, gchar *message);
+void task_handler_attach(gpointer user_data);
+gboolean restraint_next_task (ThreadData *thrdata, TaskSetupState task_state);
 
 void
 archive_entry_callback (const gchar *entry, gpointer user_data)
 {
-    AppData *app_data = (AppData *) user_data;
+    ThreadData *thrdata = (ThreadData *) user_data;
     GString *message = g_string_new (NULL);
 
     g_string_printf (message, "** Extracting %s\n", entry);
-    restraint_log_task (app_data, RSTRNT_LOG_TYPE_HARNESS, message->str, message->len);
+    restraint_log_task (thrdata, RSTRNT_LOG_TYPE_HARNESS, message->str, message->len);
     g_string_free (message, TRUE);
 }
 
@@ -65,36 +70,30 @@ void
 taskrun_archive_entry_callback (const gchar *entry, gpointer user_data)
 {
     TaskRunData *task_run_data = (TaskRunData *) user_data;
-    return archive_entry_callback (entry, task_run_data->app_data);
+    archive_entry_callback (entry, task_run_data->thrdata);
 }
 
 static gboolean
 fetch_retry (gpointer user_data)
 {
-    AppData *app_data = (AppData *) user_data;
-    Task *task = (Task *) app_data->tasks->data;
+    ThreadData *thrdata = (ThreadData *) user_data;
+    Task *task = thrdata->task;
 
     task->state = TASK_FETCH;
 
-    app_data->task_handler_id = g_idle_add_full(G_PRIORITY_DEFAULT_IDLE,
-                                                task_handler,
-                                                app_data,
-                                                NULL);
+    task_handler_attach(thrdata);
     return FALSE;
 }
 
 static gboolean
 refresh_role_retry (gpointer user_data)
 {
-    AppData *app_data = (AppData *) user_data;
-    Task *task = (Task *) app_data->tasks->data;
+    ThreadData *thrdata = (ThreadData *) user_data;
+    Task *task = thrdata->task;
 
     task->state = TASK_REFRESH_ROLES;
 
-    app_data->task_handler_id = g_idle_add_full(G_PRIORITY_DEFAULT_IDLE,
-                                                task_handler,
-                                                app_data,
-                                                NULL);
+    task_handler_attach(thrdata);
     return FALSE;
 }
 
@@ -102,8 +101,9 @@ void
 fetch_finish_callback (GError *error, guint32 match_cnt,
                        guint32 nonmatch_cnt, gpointer user_data)
 {
-    AppData *app_data = (AppData *) user_data;
-    Task *task = (Task *) app_data->tasks->data;
+    ThreadData *thrdata = (ThreadData *) user_data;
+    AppData *app_data = thrdata->app_data;
+    Task *task = thrdata->task;
     GString *message = g_string_new (NULL);
 
     if (error) {
@@ -111,7 +111,7 @@ fetch_finish_callback (GError *error, guint32 match_cnt,
             g_warning("* RETRY fetch [%d]**:%s\n", ++app_data->fetch_retries,
                     error->message);
             g_clear_error(&error);
-            g_timeout_add_seconds (TASK_FETCH_INTERVAL, fetch_retry, app_data);
+            g_timeout_add_seconds (TASK_FETCH_INTERVAL, fetch_retry, thrdata);
             return;
         } else {
             g_propagate_error (&task->error, error);
@@ -124,22 +124,20 @@ fetch_finish_callback (GError *error, guint32 match_cnt,
             g_string_printf (message, "** Fetch Summary: Match %d, "
                              "Nonmatch %d\n",
                              match_cnt, nonmatch_cnt);
-            restraint_log_task (app_data, RSTRNT_LOG_TYPE_HARNESS, message->str, message->len);
+            restraint_log_task (thrdata, RSTRNT_LOG_TYPE_HARNESS, message->str, message->len);
             g_string_free (message, TRUE);
         }
     }
 
-    app_data->task_handler_id = g_idle_add_full(G_PRIORITY_DEFAULT_IDLE,
-                                                task_handler,
-                                                app_data,
-                                                NULL);
+    task_handler_attach(thrdata);
 }
 
 void
-restraint_task_fetch(AppData *app_data) {
+restraint_task_fetch(ThreadData *thrdata) {
+    AppData *app_data = thrdata->app_data;
     g_return_if_fail(app_data != NULL);
     GError *error = NULL;
-    Task *task = (Task *) app_data->tasks->data;
+    Task *task = (Task *) thrdata->task;
 
     switch (task->fetch_method) {
         case TASK_FETCH_UNPACK:
@@ -151,7 +149,7 @@ restraint_task_fetch(AppData *app_data) {
                                      task->keepchanges,
                                      archive_entry_callback,
                                      fetch_finish_callback,
-                                     app_data);
+                                     thrdata);
             } else if (g_strcmp0(scheme, "http") == 0 ||
                        g_strcmp0(scheme, "https") == 0  ||
                        g_strcmp0(scheme, "file") == 0) {
@@ -161,13 +159,13 @@ restraint_task_fetch(AppData *app_data) {
                                       task->ssl_verify,
                                       archive_entry_callback,
                                       fetch_finish_callback,
-                                      app_data);
+                                      thrdata);
             } else {
                 g_set_error (&error, RESTRAINT_ERROR,
                              RESTRAINT_TASK_RUNNER_SCHEMA_ERROR,
                              "Unimplemented schema method %s",
                              task->fetch.url->scheme);
-                fetch_finish_callback (error, 0, 0, app_data);
+                fetch_finish_callback (error, 0, 0, thrdata);
                 return;
             }
             break;
@@ -184,7 +182,7 @@ restraint_task_fetch(AppData *app_data) {
             }
             // Use appropriate package install command
             TaskRunData *task_run_data = g_slice_new0(TaskRunData);
-            task_run_data->app_data = app_data;
+            task_run_data->thrdata = thrdata;
             task_run_data->pass_state = TASK_METADATA_PARSE;
             task_run_data->fail_state = TASK_COMPLETE;
             task_run_data->log_type = RSTRNT_LOG_TYPE_HARNESS;
@@ -198,7 +196,7 @@ restraint_task_fetch(AppData *app_data) {
             g_set_error (&error, RESTRAINT_ERROR,
                          RESTRAINT_TASK_RUNNER_FETCH_ERROR,
                          "Unknown fetch method");
-            fetch_finish_callback (error, 0, 0, app_data);
+            fetch_finish_callback (error, 0, 0, thrdata);
             g_return_if_reached();
     }
 }
@@ -209,7 +207,7 @@ io_callback (GIOChannel    *io,
              RstrntLogType  log_type,
              gpointer       user_data)
 {
-    AppData *app_data = (AppData *) user_data;
+    ThreadData *thrdata = (ThreadData *) user_data;
     GError *tmp_error = NULL;
 
     gchar buf[IO_BUFFER_SIZE] = { 0 };
@@ -223,7 +221,7 @@ io_callback (GIOChannel    *io,
                G_MESSAGES_DEBUG is used. */
             g_debug ("%s", buf);
 
-            restraint_log_task (app_data, log_type, buf, bytes_read);
+            restraint_log_task (thrdata, log_type, buf, bytes_read);
 
             return G_SOURCE_CONTINUE;
 
@@ -255,7 +253,7 @@ io_callback (GIOChannel    *io,
 gboolean
 task_io_callback (GIOChannel *io, GIOCondition condition, gpointer user_data) {
     TaskRunData *task_run_data = (TaskRunData *) user_data;
-    return io_callback(io, condition, task_run_data->log_type, task_run_data->app_data);
+    return io_callback(io, condition, task_run_data->log_type, task_run_data->thrdata);
 }
 
 gboolean
@@ -267,12 +265,9 @@ void
 task_finish_plugins_callback (gint pid_result, gboolean localwatchdog, gpointer user_data, GError *error)
 {
     TaskRunData *task_run_data = (TaskRunData *) user_data;
-    AppData *app_data = task_run_data->app_data;
+    ThreadData *thrdata = task_run_data->thrdata;
 
-    app_data->task_handler_id = g_idle_add_full(G_PRIORITY_DEFAULT_IDLE,
-                                                task_handler,
-                                                app_data,
-                                                NULL);
+    task_handler_attach(thrdata);
     g_slice_free(TaskRunData, task_run_data);
 }
 
@@ -280,8 +275,9 @@ void
 task_finish_callback (gint pid_result, gboolean localwatchdog, gpointer user_data, GError *error)
 {
     TaskRunData *task_run_data = (TaskRunData *) user_data;
-    AppData *app_data = task_run_data->app_data;
-    Task *task = app_data->tasks->data;
+    ThreadData *thrdata = task_run_data->thrdata;
+    AppData *app_data = thrdata->app_data;
+    Task *task = thrdata->task;
 
     // Did the command Succeed?
     if (pid_result == 0) {
@@ -290,7 +286,7 @@ task_finish_callback (gint pid_result, gboolean localwatchdog, gpointer user_dat
         // If not running in rhts compat mode and user hasn't reported results,
         // report PASS for exit code 0.
         if (!task->rhts_compat && !task->results_reported) {
-            restraint_task_result(task, app_data, "PASS", 0, "exit_code", NULL);
+            restraint_task_result(task, thrdata, "PASS", 0, "exit_code", NULL);
         }
     } else {
         task->state = task_run_data->fail_state;
@@ -307,7 +303,7 @@ task_finish_callback (gint pid_result, gboolean localwatchdog, gpointer user_dat
         } else {
             // If not running in rhts compat mode report FAIL if exit code is not 0
             if (!task->rhts_compat) {
-                restraint_task_result(task, app_data, "FAIL", pid_result, 
+                restraint_task_result(task, thrdata, "FAIL", pid_result,
                                       "exit_code", "Command returned non-zero");
             } else {
                 g_set_error(&task->error, RESTRAINT_ERROR,
@@ -388,10 +384,82 @@ check_param_for_override (Param *param, Task *task)
     }
 }
 
+static void
+check_conflict_kywds (char *global_keyword, KeywordInfo *info)
+{
+	if(g_strcmp0(global_keyword, info->text) == 0) {
+		g_print("key is %s, text is %s\n", global_keyword, info->text);
+		info->blocked = TRUE;
+	}
+}
+
+static void
+process_conflict_keywords (char *conflict_kywd, ThreadData *thrdata)
+{
+	KeywordInfo *info = NULL;
+    Task *task = thrdata->task;
+    AppData *app_data = thrdata->app_data;
+    gboolean try_add_again = FALSE;
+    GList *temp = NULL;
+    static GMutex mutex;
+	if (task->conflicted) {
+		g_print("task %s try add again\n", task->task_id);
+		try_add_again = TRUE;
+	}
+    if (g_strcmp0(conflict_kywd, "reboot") == 0) {
+        switch (test_round) {
+            case 0:
+		    break;
+	    case 1:
+		    temp = g_list_find(app_data->parallel_tasks, task);
+		    app_data->parallel_tasks = g_list_remove_link(app_data->parallel_tasks, temp);
+		    app_data->post_tasks = g_list_concat(app_data->post_tasks, temp);
+		    task->conflicted = TRUE;
+		    break;
+	    case 2:
+	    default:
+		    break;
+		}
+    } else if (test_round == 1) {
+        g_print("task %s conflict keywords is %s\n", task->task_id, conflict_kywd);
+		info = g_slice_new0(KeywordInfo);
+		info->text = conflict_kywd;
+		g_mutex_lock(&mutex);
+		g_list_foreach(global_confkywds, (GFunc) check_conflict_kywds, info);
+		if (info->blocked == FALSE) {
+			if (try_add_again == TRUE) {
+				g_mutex_unlock(&mutex);
+				g_print("task %s waking up\n", task->task_id);
+				temp = g_list_find(app_data->waiting_tasks, task);
+				app_data->waiting_tasks = g_list_remove_link(app_data->waiting_tasks, temp);
+				app_data->parallel_tasks = g_list_concat(app_data->parallel_tasks, temp);
+				task->conflicted = FALSE;
+			} else {
+				global_confkywds = g_list_prepend(global_confkywds, conflict_kywd);
+				g_mutex_unlock(&mutex);
+			}
+		} else {
+			g_mutex_unlock(&mutex);
+			g_print("task %s sleeping\n", task->task_id);
+		    	temp = g_list_find(app_data->parallel_tasks, task);
+		    	app_data->parallel_tasks = g_list_remove_link(app_data->parallel_tasks, temp);
+		    	app_data->waiting_tasks = g_list_concat(app_data->waiting_tasks, temp);
+		    	task->conflicted = TRUE;
+		}
+		g_slice_free(KeywordInfo, info);
+    }
+}
+
+void iterate_task_kywds(Task *task, ThreadData *thrdata)
+{
+        g_slist_foreach (task->metadata->conflict_kywds, (GFunc) process_conflict_keywords, thrdata);
+}
+
 void metadata_finish_cb(gpointer user_data, GError *error)
 {
-    AppData *app_data = (AppData *)user_data;
-    Task *task = app_data->tasks->data;
+    ThreadData *thrdata = (ThreadData *) user_data;
+    AppData *app_data = thrdata->app_data;
+    Task *task = thrdata->task;
 
     if (error) {
         g_propagate_error(&task->error, error);
@@ -417,23 +485,29 @@ void metadata_finish_cb(gpointer user_data, GError *error)
 
         task->remaining_time = remaining_time == 0 ? task->remaining_time : remaining_time;
 
+        task->remaining_time += 300;
+
         // If task->name is NULL then take name from metadata
         if (task->name == NULL) {
             task->name = task->metadata->name;
         }
+		// get conflict keywords, keyword reboot need move to post_tasks list
+		g_print("task %s metadata processing conflict keywords\n", task->task_id);
+		iterate_task_kywds(task, thrdata);
+        if (task->conflicted == TRUE) {
+			g_print("task %s blocked, execute next\n", task->task_id);
+            restraint_next_task (thrdata, TASK_IDLE);
+		}
     }
 
-    app_data->task_handler_id = g_idle_add_full(G_PRIORITY_DEFAULT_IDLE,
-                                                task_handler,
-                                                app_data,
-                                                NULL);
+    task_handler_attach(thrdata);
 }
 
 void dependency_finish_cb (gpointer user_data, GError *error)
 {
     TaskRunData *task_run_data = (TaskRunData *) user_data;
-    AppData *app_data = (AppData *) task_run_data->app_data;
-    Task *task = app_data->tasks->data;
+    ThreadData *thrdata = (ThreadData *) task_run_data->thrdata;
+    Task *task = thrdata->task;
 
     if (error) {
         g_propagate_error(&task->error, error);
@@ -442,10 +516,8 @@ void dependency_finish_cb (gpointer user_data, GError *error)
         task->state = TASK_RUN;
     }
     g_slice_free (TaskRunData, task_run_data);
-    app_data->task_handler_id = g_idle_add_full(G_PRIORITY_DEFAULT_IDLE,
-                                                task_handler,
-                                                app_data,
-                                                NULL);
+
+    task_handler_attach(thrdata);
 }
 
 void
@@ -457,8 +529,8 @@ task_handler_callback (gint pid_result, gboolean localwatchdog, gpointer user_da
      * then re-add the task_handler
      */
     TaskRunData *task_run_data = (TaskRunData *) user_data;
-    AppData *app_data = task_run_data->app_data;
-    Task *task = app_data->tasks->data;
+    ThreadData *thrdata = task_run_data->thrdata;
+    Task *task = thrdata->task;
     GError *tmp_error = NULL;
 
     task->version = get_package_version(task->fetch.package_name, &tmp_error);
@@ -483,14 +555,11 @@ task_handler_callback (gint pid_result, gboolean localwatchdog, gpointer user_da
     // free the task_run_data
     g_slice_free (TaskRunData, task_run_data);
 
-    app_data->task_handler_id = g_idle_add_full(G_PRIORITY_DEFAULT_IDLE,
-                                                task_handler,
-                                                app_data,
-                                                NULL);
+    task_handler_attach(thrdata);
 }
 
 static void
-restraint_log_lwd_message (AppData *app_data,
+restraint_log_lwd_message (ThreadData *thrdata,
                            gchar *expire_time,
                            gboolean modified_wd)
 {
@@ -498,6 +567,8 @@ restraint_log_lwd_message (AppData *app_data,
     struct tm timeinfo;
     gchar currtime[80];
     GString *message;
+
+    AppData *app_data = thrdata->app_data;
 
     g_return_if_fail(app_data != NULL && expire_time != NULL);
 
@@ -511,7 +582,7 @@ restraint_log_lwd_message (AppData *app_data,
                     expire_time);
 
     g_printerr ("%s", message->str);
-    restraint_log_task (app_data, RSTRNT_LOG_TYPE_HARNESS, message->str, message->len);
+    restraint_log_task (thrdata, RSTRNT_LOG_TYPE_HARNESS, message->str, message->len);
     g_string_free (message, TRUE);
 }
 
@@ -545,8 +616,8 @@ gboolean
 task_heartbeat_callback (gpointer user_data)
 {
     TaskRunData *task_run_data = (TaskRunData *) user_data;
-    AppData *app_data = task_run_data->app_data;
-    Task *task = (Task *) app_data->tasks->data;
+    AppData *app_data = task_run_data->thrdata->app_data;
+    Task *task = task_run_data->thrdata->task;
 
     time_t rawtime;
     double delta_sec = 0;
@@ -577,14 +648,21 @@ task_heartbeat_callback (gpointer user_data)
         if (task->remaining_time > HEARTBEAT) {
             task->remaining_time -= HEARTBEAT;
         } else {
-            task->remaining_time = 0;
+            g_print("task %s, %s lwd triggerd\n", task->task_id, task->name);
+            task_run_data->overload += load_eval()? 1 : 4;
+            if (task_run_data->overload > 0 && task_run_data->overload < 4) {
+                g_print("task %s extend 900s\n", task->task_id);
+                task->remaining_time += 900;
+            } else {
+                task->remaining_time = 0;
+            }
         }
     }
     restraint_config_set (app_data->config_file, task->task_id,
                           "remaining_time", NULL,
                           G_TYPE_UINT64, task->remaining_time);
 
-    restraint_log_lwd_message(task_run_data->app_data,
+    restraint_log_lwd_message(task_run_data->thrdata,
                               task_run_data->expire_time,
                               modified_wd);
 
@@ -594,8 +672,8 @@ task_heartbeat_callback (gpointer user_data)
 void task_timeout_cb(gpointer user_data, guint64 *time_remain)
 {
     TaskRunData *task_run_data = (TaskRunData *) user_data;
-    AppData *app_data = task_run_data->app_data;
-    Task *task = (Task *) app_data->tasks->data;
+    ThreadData *thrdata = task_run_data->thrdata;
+    Task *task = thrdata->task;
     gboolean result;
 
     result = task_heartbeat_callback(task_run_data);
@@ -607,11 +685,12 @@ void task_timeout_cb(gpointer user_data, guint64 *time_remain)
 }
 
 void
-task_run (AppData *app_data)
+task_run (ThreadData *thrdata)
 {
-    Task *task = (Task *) app_data->tasks->data;
+    AppData *app_data = thrdata->app_data;
+    Task *task = thrdata->task;
     TaskRunData *task_run_data = g_slice_new0 (TaskRunData);
-    task_run_data->app_data = app_data;
+    task_run_data->thrdata = thrdata;
     task_run_data->pass_state = TASK_COMPLETE;
     task_run_data->fail_state = TASK_COMPLETE;
 
@@ -628,7 +707,7 @@ task_run (AppData *app_data)
     task_run_data->log_type = RSTRNT_LOG_TYPE_TASK;
     restraint_start_heartbeat(task_run_data, task->remaining_time, NULL);
     if (task->metadata->nolocalwatchdog) {
-        restraint_log_lwd_message(task_run_data->app_data,
+        restraint_log_lwd_message(task_run_data->thrdata,
                                   task_run_data->expire_time,
                                   FALSE);
     }
@@ -654,18 +733,17 @@ static void
 task_message_complete (SoupSession *session, SoupMessage *msg, gpointer user_data)
 {
     // Add the task_handler back to the main loop
-    AppData *app_data = (AppData *) user_data;
-    app_data->task_handler_id = g_idle_add_full(G_PRIORITY_DEFAULT_IDLE,
-                                                task_handler,
-                                                app_data,
-                                                NULL);
+    ThreadData *thrdata = (ThreadData *) user_data;
+
+    task_handler_attach(thrdata);
 }
 
 void
-restraint_task_result (Task *task, AppData *app_data, gchar *result,
+restraint_task_result (Task *task, ThreadData *thrdata, gchar *result,
                        gint int_score, gchar *path, gchar *message)
 {
     g_return_if_fail(task != NULL);
+    AppData *app_data = thrdata->app_data;
 
     gchar *score = g_strdup_printf("%d", int_score);
     SoupURI *task_results_uri;
@@ -698,19 +776,22 @@ restraint_task_result (Task *task, AppData *app_data, gchar *result,
                             app_data->message_data,
                             NULL,
                             app_data->cancellable,
-                            app_data);
+                            thrdata);
 }
 
 void
-restraint_task_status (Task *task, AppData *app_data, gchar *status,
+restraint_task_status (Task *task, ThreadData *thrdata, gchar *status,
                        gchar *taskversion, GError *reason)
 {
+    AppData *app_data = thrdata->app_data;
     g_return_if_fail(task != NULL);
 
     SoupURI *task_status_uri;
     SoupMessage *server_msg;
     gchar *stime = g_strdup_printf("%ld", task->starttime);
     gchar *etime = g_strdup_printf("%ld", task->endtime);
+
+    g_print("update task %s status %s\n", task->task_id, status);
 
     task_status_uri = soup_uri_new_with_base(task->task_uri, "status");
     server_msg = soup_message_new_from_uri("POST", task_status_uri);
@@ -744,12 +825,13 @@ restraint_task_status (Task *task, AppData *app_data, gchar *status,
                             app_data->message_data,
                             task_message_complete,
                             app_data->cancellable,
-                            app_data);
+                            thrdata);
 }
 
 void
-restraint_task_watchdog (Task *task, AppData *app_data, guint64 seconds)
+restraint_task_watchdog (Task *task, ThreadData *thrdata, guint64 seconds)
 {
+    AppData *app_data = thrdata->app_data;
     g_return_if_fail(task != NULL);
     g_return_if_fail(seconds != 0);
 
@@ -759,6 +841,22 @@ restraint_task_watchdog (Task *task, AppData *app_data, guint64 seconds)
     gchar *data = NULL;
 
     recipe_watchdog_uri = soup_uri_new_with_base(task->recipe->recipe_uri, "watchdog");
+
+    server_msg = soup_message_new_from_uri("GET", recipe_watchdog_uri);
+    soup_session_send_message(soup_session, server_msg);
+    const gchar *resp = server_msg->response_body->data;
+    g_print("task %s, ext remain time is %s\n", task->task_id, resp);
+    gchar **tmp = g_strsplit(resp, " ", -1);
+    guint64 remaining_time = g_ascii_strtoull(*++tmp, NULL, BASE10);
+    g_object_unref(server_msg);
+    g_strfreev(--tmp);
+    if (remaining_time > seconds)
+    {
+        g_print("task %s skip exttime update\n", task->task_id);
+        task_handler_attach(thrdata);
+        return;
+    }
+
     server_msg = soup_message_new_from_uri("POST", recipe_watchdog_uri);
 
     soup_uri_free(recipe_watchdog_uri);
@@ -776,7 +874,7 @@ restraint_task_watchdog (Task *task, AppData *app_data, guint64 seconds)
                             app_data->message_data,
                             task_message_complete,
                             app_data->cancellable,
-                            app_data);
+                            thrdata);
 
     g_free(seconds_char);
 }
@@ -820,23 +918,95 @@ void restraint_task_free(Task *task) {
     g_slice_free(Task, task);
 }
 
-gboolean
-restraint_next_task (AppData *app_data, TaskSetupState task_state) {
-    Task *task = NULL;
+static void remove_keywords (char *keyword, void *unused)
+{
+	GList *temp = NULL;
+	temp = g_list_find(global_confkywds, keyword);
+	g_print("remove keyword is %s\n", (char *)(temp->data));
+	global_confkywds = g_list_delete_link(global_confkywds, temp);
+	g_print("global_keywords is: ");
+	GList *l = NULL;
+	for (l = global_confkywds; l != NULL; l = l->next)
+	{
+		g_print("%s ", (char *)(l->data));
+	}
+	g_print("\n");
+}
 
-    while ((app_data->tasks = g_list_next (app_data->tasks)) != NULL) {
-        task = (Task *) app_data->tasks->data;
+static void wakeup_tasks (Task *task, ThreadData *thrdata)
+{
+	g_print("wakeup task %s pick up keywords\n", task->task_id);
+	thrdata->task = task;
+	iterate_task_kywds(task, thrdata);
+}
+
+gboolean
+restraint_next_task (ThreadData *thrdata, TaskSetupState task_state) {
+    Task *task = thrdata->task;
+    GList *iterator = NULL;
+    AppData *app_data = thrdata->app_data;
+    static GMutex mutex;
+
+	if(task->conflicted != TRUE && task->metadata != NULL && task->metadata->conflict_kywds != NULL && test_round == 1) {
+		//remove keywords and add waiting task back to parallel list
+		g_slist_foreach(task->metadata->conflict_kywds, (GFunc) remove_keywords, NULL);
+		if (g_list_length(app_data->waiting_tasks) != 0) {
+			g_list_foreach(app_data->waiting_tasks, (GFunc) wakeup_tasks, thrdata);
+			task = thrdata->task;
+			if (task->conflicted == FALSE) {
+        		task->state = task_state;
+				return TRUE;
+			}
+		}
+	}
+
+    g_mutex_lock(&mutex);
+    if (curr_task != NULL) {
+        task = (Task *) curr_task->data;
+		thrdata->task = task;
         task->state = task_state;
+        curr_task = g_list_next(curr_task);
+        g_mutex_unlock(&mutex);
         return TRUE;
+    }
+    g_mutex_unlock(&mutex);
+
+	if (g_list_length(app_data->waiting_tasks) != 0) {
+		thread_loop_stop(thrdata);
+		return FALSE;
+	}
+
+    //only return to recipe_hander after last finished task.
+    if (test_round == 0)
+        iterator = app_data->pre_tasks;
+    else if (test_round == 1)
+        iterator = app_data->parallel_tasks;
+    else if (test_round == 2)
+        iterator = app_data->post_tasks;
+
+    while (iterator != NULL)
+    {
+	    task = (Task *) iterator->data;
+	    if (task->state != TASK_NEXT) {
+		    thread_loop_stop(thrdata);
+		    return FALSE;
+		}
+		iterator = iterator->next;
     }
 
     // No more tasks, let the recipe_handler know we are done.
-    app_data->state = RECIPE_COMPLETE;
+    if (test_round != 2) {
+        app_data->state = RECIPE_RUN;
+        test_round++;
+    }
+    else
+        app_data->state = RECIPE_COMPLETE;
     app_data->aborted = ABORTED_NONE;
     app_data->recipe_handler_id = g_idle_add_full(G_PRIORITY_DEFAULT_IDLE,
                                                   recipe_handler,
                                                   app_data,
                                                   recipe_handler_finish);
+    thread_loop_stop(thrdata);
     return FALSE;
 }
 
@@ -989,14 +1159,15 @@ parse_task_config (gchar   *config_file,
 static void
 recipe_fetch_complete(GError *error, xmlDoc *doc, gpointer user_data)
 {
-    AppData *app_data = (AppData *)user_data;
-    Task *task = app_data->tasks->data;
+    ThreadData *thrdata = (ThreadData *) user_data;
+    AppData *app_data = thrdata->app_data;
+    Task *task = thrdata->task;
 
     if (error) {
         if (app_data->fetch_retries < ROLE_REFRESH_RETRIES) {
             g_print("* RETRY refresh roles [%d]**:%s\n", ++app_data->fetch_retries,
                     error->message);
-            g_timeout_add_seconds (ROLE_REFRESH_INTERVAL, refresh_role_retry, app_data);
+            g_timeout_add_seconds (ROLE_REFRESH_INTERVAL, refresh_role_retry, thrdata);
             return;
         } else {
             g_warn_if_fail(!doc);
@@ -1015,24 +1186,35 @@ recipe_fetch_complete(GError *error, xmlDoc *doc, gpointer user_data)
         }
     }
 
-    app_data->task_handler_id = g_idle_add_full(G_PRIORITY_DEFAULT_IDLE,
-            task_handler, app_data, NULL);
+    task_handler_attach(thrdata);
+}
+
+void task_handler_attach(gpointer user_data)
+{
+	ThreadData *thrdata = (ThreadData *) user_data;
+	GMainContext *ctxt = thrdata->ctxt;
+	GSource *source;
+	source = g_idle_source_new();
+	g_source_set_callback(source, task_handler, thrdata, NULL);
+	g_source_attach(source, ctxt);
 }
 
 static gboolean
 uploader_func (gpointer user_data)
 {
+    ThreadData *thrdata;
     AppData *app_data;
     Task    *task;
 
     g_return_val_if_fail (NULL != user_data, G_SOURCE_REMOVE);
 
-    app_data = user_data;
+    thrdata = user_data;
+    app_data = thrdata->app_data;
 
     g_return_val_if_fail (NULL != app_data->tasks, G_SOURCE_REMOVE);
     g_return_val_if_fail (NULL != app_data->tasks->data, G_SOURCE_REMOVE);
 
-    task = app_data->tasks->data;
+    task = thrdata->task;
 
     g_debug ("%s(): Upload event for task %s", __func__, task->task_id);
 
@@ -1042,26 +1224,28 @@ uploader_func (gpointer user_data)
 }
 
 static void
-start_uploader (AppData *app_data)
+start_uploader (ThreadData *thrdata)
 {
     Task  *task;
+    AppData *app_data = thrdata->app_data;
 
     g_return_if_fail (NULL != app_data);
     g_return_if_fail (app_data->uploader_interval > 0);
 
     app_data->uploader_source_id = g_timeout_add_seconds (app_data->uploader_interval,
                                                           uploader_func,
-                                                          app_data);
+							  thrdata);
 
-    task = app_data->tasks->data;
+    task = thrdata->task;
 
     g_debug ("%s(): Added upload event source %d for task %s",
              __func__, app_data->uploader_source_id, task->task_id);
 }
 
 static void
-stop_uploader (AppData *app_data)
+stop_uploader (ThreadData *thrdata)
 {
+    AppData *app_data = thrdata->app_data;
     Task *task;
 
     g_return_if_fail (NULL != app_data);
@@ -1069,7 +1253,7 @@ stop_uploader (AppData *app_data)
 
     g_source_remove (app_data->uploader_source_id);
 
-    task = app_data->tasks->data;
+    task = thrdata->task;
 
     g_debug ("%s(): Removed upload event source %d for task %s",
              __func__, app_data->uploader_source_id, task->task_id);
@@ -1080,15 +1264,10 @@ stop_uploader (AppData *app_data)
 gboolean
 task_handler (gpointer user_data)
 {
-  AppData *app_data = (AppData *) user_data;
+  ThreadData *thrdata = (ThreadData *) user_data;
+  AppData *app_data = thrdata->app_data;
 
-  // No More tasks, return false so this handler gets removed.
-  if (app_data->tasks == NULL) {
-      g_message ("no more tasks..");
-      return G_SOURCE_REMOVE;
-  }
-
-  Task *task = app_data->tasks->data;
+  Task *task = thrdata->task;
   GString *message = g_string_new(NULL);
   gboolean result = G_SOURCE_CONTINUE;
 
@@ -1122,7 +1301,7 @@ task_handler (gpointer user_data)
               task->state = TASK_METADATA_PARSE;
           } else {
               // If neither started nor finished then fetch the task
-              restraint_task_status (task, app_data, "Running", NULL, NULL);
+              restraint_task_status (task, thrdata, "Running", NULL, NULL);
               result = G_SOURCE_REMOVE;
               g_string_printf(message, "** Fetching task: %s [%s]\n", task->task_id, task->path);
               app_data->fetch_retries = 0;
@@ -1141,15 +1320,15 @@ task_handler (gpointer user_data)
             g_string_printf(message, "** Fetching task: Retries %" G_GINT32_FORMAT "\n",
                             app_data->fetch_retries);
         }
-        restraint_task_fetch (app_data);
+        restraint_task_fetch (thrdata);
         result = G_SOURCE_REMOVE;
         break;
     case TASK_METADATA_PARSE:
-      g_string_printf (message, "** Preparing metadata\n");
+      g_string_printf (message, "** Preparing task %s metadata\n", task->task_id);
       task->rhts_compat = restraint_get_metadata(task->path,
                             task->recipe->osmajor, &task->metadata,
                             app_data->cancellable, metadata_finish_cb,
-                            metadata_io_callback, app_data);
+                            metadata_io_callback, thrdata);
       result = G_SOURCE_REMOVE;
       break;
     case TASK_REFRESH_ROLES:
@@ -1160,7 +1339,7 @@ task_handler (gpointer user_data)
           g_string_printf(message, "** Refreshing peer role hostnames: Retries %"
                                      G_GINT32_FORMAT "\n", app_data->fetch_retries);
           restraint_xml_parse_from_url(soup_session, app_data->recipe_url,
-                  recipe_fetch_complete, app_data);
+                  recipe_fetch_complete, thrdata);
           result = G_SOURCE_REMOVE;
       } else {
           task->state = TASK_ENV;
@@ -1171,15 +1350,15 @@ task_handler (gpointer user_data)
       // Includes JOBID, TASKID, OSDISTRO, etc..
       // If not running in rhts_compat mode it will prepend
       // the variables with ENV_PREFIX.
-      g_string_printf(message, "** Updating env vars\n");
-      build_env(app_data->restraint_url, app_data->port, task);
+      g_string_printf(message, "** Updating task %s env vars\n", task->task_id);
+      build_env(app_data->restraint_url, app_data->port, task, app_data);
       task->state = TASK_WATCHDOG;
       break;
     case TASK_WATCHDOG:
       // Setup external watchdog
       if (!task->started) {
-          g_string_printf(message, "** Updating external watchdog: %" G_GINT64_FORMAT " seconds\n", task->remaining_time + EWD_TIME);
-          restraint_task_watchdog (task, app_data, task->remaining_time + EWD_TIME);
+          g_string_printf(message, "** Updating task %s external watchdog: %" G_GINT64_FORMAT " seconds\n", task->task_id, task->remaining_time + EWD_TIME);
+          restraint_task_watchdog (task, thrdata, task->remaining_time + EWD_TIME);
           result = G_SOURCE_REMOVE;
       }
       task->state = TASK_DEPENDENCIES;
@@ -1192,9 +1371,9 @@ task_handler (gpointer user_data)
           if (!app_data->stdin && recipe_wait_on_beaker (app_data->recipe_url, "** Task dependencies"))
               break;
 
-          g_string_printf(message, "** Installing dependencies\n");
+          g_string_printf(message, "** Installing taks %s dependencies\n", task->task_id);
           TaskRunData *task_run_data = g_slice_new0(TaskRunData);
-          task_run_data->app_data = app_data;
+          task_run_data->thrdata = thrdata;
           task_run_data->log_type = RSTRNT_LOG_TYPE_HARNESS;
           restraint_start_heartbeat(task_run_data, 0, NULL);
           restraint_install_dependencies (task, task_io_callback,
@@ -1216,7 +1395,7 @@ task_handler (gpointer user_data)
           task->state = TASK_COMPLETE;
       } else {
           g_string_printf(message, "** Running task: %s [%s]\n", task->task_id, task->name);
-          task_run (app_data);
+          task_run (thrdata);
           task->starttime = time(NULL);
           result = G_SOURCE_REMOVE;
           task->started = TRUE;
@@ -1256,16 +1435,16 @@ task_handler (gpointer user_data)
     {
       if (rstrnt_log_manager_enabled (app_data)) {
           if (0 != app_data->uploader_source_id)
-              stop_uploader (app_data);
+              stop_uploader (thrdata);
 
           rstrnt_upload_logs (task, app_data, soup_session, app_data->cancellable);
       }
       // Some step along the way failed.
       if (task->error) {
-        restraint_task_status(task, app_data, "Aborted", task->version, task->error);
+        restraint_task_status(task, thrdata, "Aborted", task->version, task->error);
         g_clear_error(&task->error);
       } else {
-        restraint_task_status(task, app_data, "Completed", task->version, NULL);
+        restraint_task_status(task, thrdata, "Completed", task->version, NULL);
       }
       // Rmeove the entire [task] section from the config.
       restraint_config_set (app_data->config_file, task->task_id, NULL, NULL, -1);
@@ -1281,7 +1460,7 @@ task_handler (gpointer user_data)
     }
     case TASK_NEXT:
       // Get the next task and run it.
-      result = restraint_next_task (app_data, TASK_IDLE);
+      result = restraint_next_task (thrdata, TASK_IDLE);
       break;
     default:
       result = G_SOURCE_CONTINUE;
@@ -1290,7 +1469,7 @@ task_handler (gpointer user_data)
 
   if (message->len > 0) {
       g_printerr ("%s", message->str);
-      restraint_log_task (app_data, RSTRNT_LOG_TYPE_HARNESS, message->str, message->len);
+      restraint_log_task (thrdata, RSTRNT_LOG_TYPE_HARNESS, message->str, message->len);
   }
 
   g_string_free (message, TRUE);
@@ -1299,7 +1478,7 @@ task_handler (gpointer user_data)
 }
 
 static void
-connections_write (AppData     *app_data,
+connections_write (ThreadData	*thrdata,
                    const gchar *path,
                    const gchar *msg_data,
                    gsize        msg_len)
@@ -1311,10 +1490,12 @@ connections_write (AppData     *app_data,
     g_autofree gchar    *section = NULL;
     g_autoptr (GError)   err = NULL;
 
+    AppData *app_data = thrdata->app_data;
+
     if (app_data->tasks == NULL || g_cancellable_is_cancelled (app_data->cancellable))
         return;
 
-    task = (Task *) app_data->tasks->data;
+    task = thrdata->task;
     task_output_uri = soup_uri_new_with_base (task->task_uri, path);
     server_msg = soup_message_new_from_uri ("PUT", task_output_uri);
 
@@ -1345,21 +1526,23 @@ connections_write (AppData     *app_data,
 }
 
 void
-restraint_log_task (AppData       *app_data,
+restraint_log_task (ThreadData	*thrdata,
                     RstrntLogType  type,
                     const char    *data,
                     gsize          size)
 {
     const char *log_path = NULL;
 
+    AppData *app_data = thrdata->app_data;
+
     g_return_if_fail (app_data != NULL);
     g_return_if_fail (data != NULL && size > 0);
 
     if (rstrnt_log_manager_enabled (app_data)) {
-        rstrnt_log_bytes (app_data->tasks->data, type, data, size);
+        rstrnt_log_bytes (thrdata->task, type, data, size);
 
         if (0 == app_data->uploader_source_id)
-            start_uploader (app_data);
+            start_uploader (thrdata);
 
         return;
     }
@@ -1368,5 +1551,5 @@ restraint_log_task (AppData       *app_data,
 
     g_return_if_fail (NULL != log_path);
 
-    connections_write (app_data, log_path, data, size);
+    connections_write (thrdata, log_path, data, size);
 }

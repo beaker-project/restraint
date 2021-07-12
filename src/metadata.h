@@ -38,6 +38,8 @@ typedef struct {
     gboolean nolocalwatchdog;
     /* Use pty when running task */
     gboolean use_pty;
+    /* List of conflict keywords */
+    GSList *conflict_kywds;
 } MetaData;
 
 typedef void (*metadata_cb) (gpointer user_data, GError *error);
