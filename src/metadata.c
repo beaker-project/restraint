@@ -406,7 +406,7 @@ static gboolean parse_testinfo_from_fd(MetaData *metadata,
     gssize bytes_read;
     struct stat stat_buf;
     gchar read_buf[4096];
-    GString *parse_buffer = g_string_sized_new(128);
+    g_autoptr (GString) parse_buffer = g_string_sized_new(128);
 
     if (fstat(fd, &stat_buf) < 0) {
         g_set_error_literal(error, G_FILE_ERROR,
@@ -419,7 +419,6 @@ static gboolean parse_testinfo_from_fd(MetaData *metadata,
         g_set_error_literal (error, G_FILE_ERROR,
                              RESTRAINT_OPEN,
                              "Not a regular file");
-      g_string_free(parse_buffer, TRUE);
       return FALSE;
     }
 
@@ -436,7 +435,6 @@ static gboolean parse_testinfo_from_fd(MetaData *metadata,
             g_set_error_literal(error, G_FILE_ERROR,
                                 g_file_error_from_errno(errno),
                                 g_strerror(errno));
-            g_string_free(parse_buffer, TRUE);
             return FALSE;
         }
         file_parse_data(metadata,
@@ -448,17 +446,14 @@ static gboolean parse_testinfo_from_fd(MetaData *metadata,
 
     if (tmp_error) {
         g_propagate_error(error, tmp_error);
-        g_string_free(parse_buffer, TRUE);
         return FALSE;
     }
 
     flush_parse_buffer(metadata, parse_buffer, &tmp_error);
     if (tmp_error) {
         g_propagate_error(error, tmp_error);
-        g_string_free(parse_buffer, TRUE);
         return FALSE;
     }
-    g_string_free(parse_buffer, TRUE);
     return TRUE;
 }
 

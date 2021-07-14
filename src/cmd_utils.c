@@ -66,25 +66,21 @@ void get_env_vars_and_format_ServerData(ServerData *s_data)
 static void
 alter_envvar_from_file(guint port, gboolean set, GError **error) {
     int i;
-    gchar *msgbuf = NULL;
-    gchar *filename = get_envvar_filename(port);
+    g_autofree gchar *msgbuf = NULL;
+    g_autofree gchar *filename = get_envvar_filename(port);
 
     if ((filename == NULL) || (!g_file_test(filename, G_FILE_TEST_EXISTS))) {
         g_set_error (error, RESTRAINT_ERROR,
                      RESTRAINT_MISSING_FILE,
                      "File %s not present",
                      (filename == NULL) ? "None" : filename);
-        g_free(filename);
         return;
     }
-    g_file_get_contents(filename, &msgbuf,
-                        NULL, error);
-    g_free(filename);
-    if (error && *error) {
+    if (!g_file_get_contents(filename, &msgbuf, NULL, error))
+    {
         return;
     }
     gchar **myarr = g_strsplit(msgbuf, "\n", -1);
-    g_free(msgbuf);
 
     for (i=0; myarr[i] != NULL; i++) {
         if (strlen(myarr[i]) != 0) {

@@ -806,14 +806,13 @@ gboolean
 remote_io_callback (GIOChannel *io, GIOCondition condition, gpointer user_data) {
     GError *tmp_error = NULL;
 
-    gchar *s;
+    g_autofree gchar *s = NULL;
     gsize bytes_read;
 
     if (condition & G_IO_IN) {
         switch (g_io_channel_read_line(io, &s, &bytes_read, NULL, &tmp_error)) {
           case G_IO_STATUS_NORMAL:
             handle_message(s, user_data);
-            g_free(s);
             return TRUE;
 
           case G_IO_STATUS_ERROR:
@@ -1388,6 +1387,7 @@ static gchar *copy_job_as_template(gchar *job, gboolean novalid,
                 g_printerr ("Unable to find matching host for recipe id:%s did you pass --host on the cmd line?\n", id);
                 xmlFreeDoc(template_xml_doc_ptr);
                 xmlXPathFreeObject(recipe_nodes);
+                xmlXPathFreeObject(recipeset_nodes);
                 g_hash_table_destroy(posroles);
                 return NULL;
             }
@@ -1714,7 +1714,7 @@ parse_host (const gchar *connect_uri)
 {
     GMatchInfo  *match_info;
     GRegex      *regex;
-    gchar      **ssh_destination;
+    g_auto (GStrv) ssh_destination = NULL;
 
     g_return_val_if_fail (connect_uri != NULL, NULL);
 
@@ -1744,13 +1744,12 @@ parse_host (const gchar *connect_uri)
         g_free (deprecated);
     } else {
         g_printerr ("Malformed host: %s, see help for reference\n", connect_uri);
-        ssh_destination = NULL;
     }
 
     g_match_info_free (match_info);
     g_regex_unref (regex);
 
-    return ssh_destination;
+    return g_steal_pointer (&ssh_destination);
 }
 
 static gboolean

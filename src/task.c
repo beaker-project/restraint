@@ -104,7 +104,6 @@ fetch_finish_callback (GError *error, guint32 match_cnt,
 {
     AppData *app_data = (AppData *) user_data;
     Task *task = (Task *) app_data->tasks->data;
-    GString *message = g_string_new (NULL);
 
     if (error) {
         if (app_data->fetch_retries < TASK_FETCH_RETRIES) {
@@ -121,11 +120,12 @@ fetch_finish_callback (GError *error, guint32 match_cnt,
         task->state = TASK_METADATA_PARSE;
 
         if ((match_cnt > 0) || (nonmatch_cnt > 0)) {
+            g_autoptr (GString) message = g_string_new (NULL);
+
             g_string_printf (message, "** Fetch Summary: Match %d, "
                              "Nonmatch %d\n",
                              match_cnt, nonmatch_cnt);
             restraint_log_task (app_data, RSTRNT_LOG_TYPE_HARNESS, message->str, message->len);
-            g_string_free (message, TRUE);
         }
     }
 
@@ -667,7 +667,7 @@ restraint_task_result (Task *task, AppData *app_data, gchar *result,
 {
     g_return_if_fail(task != NULL);
 
-    gchar *score = g_strdup_printf("%d", int_score);
+    g_autofree gchar *score = g_strdup_printf("%d", int_score);
     SoupURI *task_results_uri;
     SoupMessage *server_msg;
 
@@ -689,7 +689,6 @@ restraint_task_result (Task *task, AppData *app_data, gchar *result,
                                 "message", message, NULL);
         g_message("%s task %s due to : %s", result, task->task_id, message);
     }
-    g_free (score);
     soup_message_set_request(server_msg, "application/x-www-form-urlencoded",
             SOUP_MEMORY_TAKE, data, strlen(data));
 
@@ -709,8 +708,6 @@ restraint_task_status (Task *task, AppData *app_data, gchar *status,
 
     SoupURI *task_status_uri;
     SoupMessage *server_msg;
-    gchar *stime = g_strdup_printf("%ld", task->starttime);
-    gchar *etime = g_strdup_printf("%ld", task->endtime);
 
     task_status_uri = soup_uri_new_with_base(task->task_uri, "status");
     server_msg = soup_message_new_from_uri("POST", task_status_uri);
@@ -719,6 +716,8 @@ restraint_task_status (Task *task, AppData *app_data, gchar *status,
     g_return_if_fail(server_msg != NULL);
 
     gchar *data = NULL;
+    g_autofree gchar *stime = g_strdup_printf("%ld", task->starttime);
+    g_autofree gchar *etime = g_strdup_printf("%ld", task->endtime);
     GHashTable *data_table = g_hash_table_new (NULL, NULL);
     g_hash_table_insert(data_table, "status", status);
     g_hash_table_insert(data_table, "stime", stime);
@@ -736,8 +735,6 @@ restraint_task_status (Task *task, AppData *app_data, gchar *status,
             SOUP_MEMORY_TAKE, data, strlen(data));
 
     g_hash_table_destroy(data_table);
-    g_free(etime);
-    g_free(stime);
 
     app_data->queue_message(soup_session,
                             server_msg,
