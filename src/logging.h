@@ -52,6 +52,8 @@ void              rstrnt_log                      (const RstrntTask    *task,
                                                    const char          *format,
                                                    ...) G_GNUC_PRINTF (3, 4);
 
+void              rstrnt_close_logs               (const RstrntTask *task);
+
 RstrntLogManager *rstrnt_log_manager_get_instance (void);
 
 const gchar      *rstrnt_log_type_get_path        (RstrntLogType type);

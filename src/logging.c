@@ -15,6 +15,8 @@
   along with Restraint.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <fcntl.h>
+#include <gio/gunixoutputstream.h>
 #include "logging.h"
 #include "task.h"
 #include "beaker_harness.h"
@@ -37,7 +39,7 @@ G_DEFINE_TYPE (RstrntLogManager, rstrnt_log_manager, G_TYPE_OBJECT)
 typedef struct
 {
     GFile *file;
-    GFileOutputStream *output_stream;
+    GOutputStream *output_stream;
 } RstrntLogData;
 
 typedef struct
@@ -119,12 +121,15 @@ rstrnt_log_data_new (GFile   *file,
                      GError **error)
 {
     RstrntLogData *data;
+    g_autofree char *path = g_file_get_path(file);
+    gint fd = open(path, O_CREAT | O_APPEND | O_WRONLY, 0666);
 
     data = g_new0 (RstrntLogData, 1);
 
     data->file = g_object_ref (file);
-    data->output_stream = g_file_append_to (data->file, G_FILE_CREATE_NONE,
-                                            NULL, error);
+    data->output_stream = g_unix_output_stream_new(fd, TRUE);
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+
     if (NULL == data->output_stream)
     {
         rstrnt_log_data_destroy (data);
@@ -175,9 +180,9 @@ rstrnt_task_log_data_new (const RstrntTask  *task,
     g_autofree char *log_directory_path = NULL;
     g_autoptr (GFile) log_directory = NULL;
     g_autoptr (GFile) task_log_file = NULL;
-    g_autoptr (GFileOutputStream) task_log_file_output_stream = NULL;
+    g_autoptr (GOutputStream) task_log_file_output_stream = NULL;
     g_autoptr (GFile) harness_log_file = NULL;
-    g_autoptr (GFileOutputStream) harness_log_file_output_stream = NULL;
+    g_autoptr (GOutputStream) harness_log_file_output_stream = NULL;
     RstrntTaskLogData *data;
 
     log_directory_path = g_build_path ("/", LOG_MANAGER_DIR, task->task_id, NULL);
@@ -511,6 +516,17 @@ rstrnt_upload_logs (const RstrntTask    *task,
 
     rstrnt_upload_log (task, app_data, session, cancellable, RSTRNT_LOG_TYPE_TASK);
     rstrnt_upload_log (task, app_data, session, cancellable, RSTRNT_LOG_TYPE_HARNESS);
+}
+
+void
+rstrnt_close_logs (const RstrntTask *task)
+{
+    RstrntLogManager *manager;
+    
+    g_return_if_fail (NULL != task);
+    manager = rstrnt_log_manager_get_instance ();
+
+    g_hash_table_remove(manager->logs, task->task_id);
 }
 
 static void

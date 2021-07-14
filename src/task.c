@@ -1259,6 +1259,7 @@ task_handler (gpointer user_data)
               stop_uploader (app_data);
 
           rstrnt_upload_logs (task, app_data, soup_session, app_data->cancellable);
+          rstrnt_close_logs (task);
       }
       // Some step along the way failed.
       if (task->error) {
