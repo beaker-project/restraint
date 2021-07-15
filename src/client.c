@@ -1910,6 +1910,8 @@ int main(int argc, char *argv[]) {
         goto cleanup;
     }
 
+    signal(SIGPIPE, SIG_IGN);
+
     g_hash_table_foreach(app_data->recipes, (GHFunc)&recipe_init, NULL);
 
     app_data->regexes = register_path (app_data->regexes,
